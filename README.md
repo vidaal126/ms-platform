@@ -103,6 +103,10 @@ docker compose up -d --build
 | localhost:5433 | Postgres com os 5 databases |
 | 3000 a 3004 | serviços, expostos só para desenvolvimento |
 
+Só o gateway (8088) e o Grafana (3300) escutam em todas as interfaces. As
+demais portas são publicadas em `127.0.0.1`: os serviços internos confiam nos
+headers `x-user-*` e não podem ser alcançados pela rede sem passar pelo gateway.
+
 Admin inicial: `admin@ms-platform.local` / `admin-dev-password`
 (`AUTH_BOOTSTRAP_ADMIN_*`). **Troque fora do ambiente local.**
 
@@ -244,8 +248,8 @@ O smoke cobre:
 ## Limitações conhecidas
 
 - **Serviços internos confiam no gateway.** Eles não revalidam o JWT. Em
-  produção, só o gateway deve ser publicado, e as portas 3000 a 3004 existem
-  apenas para desenvolvimento. A exceção é o ms-auth, que revalida o token em
+  produção, só o gateway deve ser publicado; aqui as portas 3000 a 3004 ficam
+  presas a `127.0.0.1` e existem apenas para desenvolvimento. A exceção é o ms-auth, que revalida o token em
   `/users`.
 - **Consistência eventual das réplicas.** Um cadastro recém-feito em outro
   serviço pode dar 422 por alguns instantes. O smoke espera por isso.

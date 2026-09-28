@@ -51,7 +51,7 @@ services:
       POSTGRES_USER: ${POSTGRES_ADMIN_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:-postgres}
     ports:
-      - "${POSTGRES_PORT:-5433}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -98,7 +98,7 @@ services:
     image: confluentinc/cp-kafka:7.6.1
     restart: unless-stopped
     ports:
-      - "${KAFKA_EXTERNAL_PORT:-9092}:9092"
+      - "127.0.0.1:${KAFKA_EXTERNAL_PORT:-9092}:9092"
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
@@ -140,7 +140,7 @@ services:
     image: provectuslabs/kafka-ui:v0.7.2
     restart: unless-stopped
     ports:
-      - "${KAFKA_UI_PORT:-8090}:8080"
+      - "127.0.0.1:${KAFKA_UI_PORT:-8090}:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
@@ -209,7 +209,7 @@ services:
       AUTH_BOOTSTRAP_ADMIN_EMAIL: ${AUTH_BOOTSTRAP_ADMIN_EMAIL:-admin@ms-platform.local}
       AUTH_BOOTSTRAP_ADMIN_PASSWORD: ${AUTH_BOOTSTRAP_ADMIN_PASSWORD:-admin-dev-password}
     ports:
-      - "${AUTH_PORT:-3002}:8080"
+      - "127.0.0.1:${AUTH_PORT:-3002}:8080"
     volumes:
       - auth_keys:/keys:ro
     depends_on:
@@ -242,7 +242,7 @@ services:
       <<: *kafka-env
       DATABASE_URL: postgresql://${CATALOG_DB_USER:-catalog}:${CATALOG_DB_PASSWORD:-catalog}@postgres:5432/${CATALOG_DB_NAME:-catalog}?schema=public
     ports:
-      - "${CATALOG_PORT:-3000}:8080"
+      - "127.0.0.1:${CATALOG_PORT:-3000}:8080"
     depends_on:
       catalog-migrate:
         condition: service_completed_successfully
@@ -274,7 +274,7 @@ services:
       DATABASE_URL: postgresql://${TRANSPORT_DB_USER:-transport}:${TRANSPORT_DB_PASSWORD:-transport}@postgres:5432/${TRANSPORT_DB_NAME:-transport}?schema=public
       CATALOG_SYNC_GROUP_ID: ${CATALOG_SYNC_GROUP_ID:-ms-transport.catalog-item-sync}
     ports:
-      - "${TRANSPORT_PORT:-3001}:8080"
+      - "127.0.0.1:${TRANSPORT_PORT:-3001}:8080"
     depends_on:
       transport-migrate:
         condition: service_completed_successfully
@@ -305,7 +305,7 @@ services:
       <<: *kafka-env
       DATABASE_URL: postgresql://${CUSTOMER_DB_USER:-customer}:${CUSTOMER_DB_PASSWORD:-customer}@postgres:5432/${CUSTOMER_DB_NAME:-customer}?schema=public
     ports:
-      - "${CUSTOMER_PORT:-3003}:8080"
+      - "127.0.0.1:${CUSTOMER_PORT:-3003}:8080"
     depends_on:
       customer-migrate:
         condition: service_completed_successfully
@@ -336,7 +336,7 @@ services:
       <<: *kafka-env
       DATABASE_URL: postgresql://${SALES_ORDER_DB_USER:-sales_order}:${SALES_ORDER_DB_PASSWORD:-sales_order}@postgres:5432/${SALES_ORDER_DB_NAME:-sales_order}?schema=public
     ports:
-      - "${SALES_ORDER_PORT:-3004}:8080"
+      - "127.0.0.1:${SALES_ORDER_PORT:-3004}:8080"
     depends_on:
       sales-order-migrate:
         condition: service_completed_successfully
@@ -352,7 +352,7 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-7d}
     ports:
-      - "${PROMETHEUS_PORT:-9090}:9090"
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
     volumes:
       - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
@@ -374,7 +374,7 @@ services:
     restart: unless-stopped
     command: ["-config.file=/etc/loki/loki.yml"]
     ports:
-      - "${LOKI_PORT:-3100}:3100"
+      - "127.0.0.1:${LOKI_PORT:-3100}:3100"
     volumes:
       - ./observability/loki/loki.yml:/etc/loki/loki.yml:ro
       - loki_data:/loki

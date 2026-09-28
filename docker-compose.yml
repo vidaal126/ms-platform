@@ -1,58 +1,99 @@
-# Ambiente completo: ms-catalog, ms-transport e a infraestrutura dos dois.
+# Plataforma completa: gateway, auth, catalogo, transporte, cliente, ordem de
+# venda, infraestrutura (Postgres, Kafka) e observabilidade.
 #
-#   docker compose up -d --build              sobe tudo (apps em container)
-#   docker compose up -d postgres kafka kafka-init kafka-ui
-#                                             so a infraestrutura, para rodar os apps no host
+#   docker compose up -d --build        sobe tudo (apps em container)
+#   docker compose up -d postgres postgres-init kafka kafka-init kafka-ui
+#                                       so a infraestrutura, para rodar apps no host
 #
-# Os servicos sao buildados a partir dos repositorios irmaos (../ms-catalog e
-# ../ms-transport; configuravel por CATALOG_CONTEXT e TRANSPORT_CONTEXT).
+# Entrada publica: ms-gateway (http://localhost:8088/api/v1). As portas dos
+# servicos internos ficam expostas so para desenvolvimento no host: os
+# servicos confiam no gateway (x-user-*) e nao revalidam JWT.
 #
-# Postgres: um container, dois databases (catalog e transport), cada um com
-# usuario proprio, criados por initdb/01-create-databases.sh na primeira subida.
+# Postgres: um container, um database e um usuario por servico. O job
+# postgres-init cria o que faltar a cada subida (idempotente, funciona tambem
+# em volume ja existente).
 #
-# Kafka tem dois listeners: INTERNAL (kafka:29092) para quem esta na rede do
-# compose e EXTERNAL (localhost:9092) para os apps rodando no host. Por isso os
-# containers recebem KAFKA_BROKER=kafka:29092 e o .env do host usa
-# localhost:9092.
+# Kafka: listener INTERNAL (kafka:29092) para containers e EXTERNAL
+# (localhost:9092) para apps no host. Auto-create desligado: todo topico vem
+# do kafka-init (scripts/create-topics.sh).
 #
-# Auto-create de topicos desligado: todo topico existe porque o kafka-init o
-# criou (particoes e retencao explicitas). Um nome de topico errado falha em
-# vez de criar um topico novo silenciosamente.
+# Observabilidade: Prometheus (metricas dos 6 servicos + lag via
+# kafka-exporter), Loki + Alloy (logs JSON dos containers) e Grafana com
+# datasources e dashboard provisionados (http://localhost:3300).
 #
-# Volumes: o do Kafka reaproveita, por padrao, o volume do compose antigo
-# (ms-catalog_kafka_data), preservando a massa do topico. Para um ambiente
-# isolado, sobrescreva KAFKA_VOLUME e POSTGRES_VOLUME (ver README).
+# Volumes: o do Kafka reaproveita por padrao o volume do compose antigo
+# (ms-catalog_kafka_data). Para um ambiente isolado, sobrescreva
+# KAFKA_VOLUME, POSTGRES_VOLUME, AUTH_KEYS_VOLUME e os de observabilidade
+# (ver README).
+
+x-app-healthcheck: &app-healthcheck
+  test: ["CMD", "wget", "-qO-", "http://localhost:8080/health/live"]
+  interval: 10s
+  timeout: 5s
+  retries: 5
+
+x-app-base: &app-base
+  restart: unless-stopped
+  networks:
+    - platform
+
+x-kafka-env: &kafka-env
+  KAFKA_BROKER: kafka:29092
+  NODE_ENV: production
+  LOG_LEVEL: ${LOG_LEVEL:-info}
 
 services:
+  # ---------------------------------------------------------------- Postgres
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_ADMIN_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:-postgres}
-      CATALOG_DB_USER: ${CATALOG_DB_USER:-catalog}
-      CATALOG_DB_PASSWORD: ${CATALOG_DB_PASSWORD:-catalog}
-      CATALOG_DB_NAME: ${CATALOG_DB_NAME:-catalog}
-      TRANSPORT_DB_USER: ${TRANSPORT_DB_USER:-transport}
-      TRANSPORT_DB_PASSWORD: ${TRANSPORT_DB_PASSWORD:-transport}
-      TRANSPORT_DB_NAME: ${TRANSPORT_DB_NAME:-transport}
     ports:
       - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      # TCP em 127.0.0.1 so responde depois do init (o servidor temporario do
-      # initdb escuta apenas no socket): saudavel = os dois databases existem.
-      test:
-        - CMD-SHELL
-        - psql -h 127.0.0.1 -U $${POSTGRES_USER} -d $${TRANSPORT_DB_NAME} -tAc 'select 1' >/dev/null
+      # TCP em 127.0.0.1 so responde depois do initdb do proprio Postgres.
+      test: ["CMD-SHELL", "psql -h 127.0.0.1 -U $${POSTGRES_USER} -d postgres -tAc 'select 1' >/dev/null"]
       interval: 5s
       timeout: 5s
       retries: 10
     networks:
       - platform
 
+  postgres-init:
+    image: postgres:16-alpine
+    restart: "no"
+    entrypoint: ["/bin/sh", "/scripts/create-databases.sh"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER:-postgres}
+      PGPASSWORD: ${POSTGRES_ADMIN_PASSWORD:-postgres}
+      CATALOG_DB_USER: ${CATALOG_DB_USER:-catalog}
+      CATALOG_DB_PASSWORD: ${CATALOG_DB_PASSWORD:-catalog}
+      CATALOG_DB_NAME: ${CATALOG_DB_NAME:-catalog}
+      TRANSPORT_DB_USER: ${TRANSPORT_DB_USER:-transport}
+      TRANSPORT_DB_PASSWORD: ${TRANSPORT_DB_PASSWORD:-transport}
+      TRANSPORT_DB_NAME: ${TRANSPORT_DB_NAME:-transport}
+      AUTH_DB_USER: ${AUTH_DB_USER:-auth}
+      AUTH_DB_PASSWORD: ${AUTH_DB_PASSWORD:-auth}
+      AUTH_DB_NAME: ${AUTH_DB_NAME:-auth}
+      CUSTOMER_DB_USER: ${CUSTOMER_DB_USER:-customer}
+      CUSTOMER_DB_PASSWORD: ${CUSTOMER_DB_PASSWORD:-customer}
+      CUSTOMER_DB_NAME: ${CUSTOMER_DB_NAME:-customer}
+      SALES_ORDER_DB_USER: ${SALES_ORDER_DB_USER:-sales_order}
+      SALES_ORDER_DB_PASSWORD: ${SALES_ORDER_DB_PASSWORD:-sales_order}
+      SALES_ORDER_DB_NAME: ${SALES_ORDER_DB_NAME:-sales_order}
+    volumes:
+      - ./scripts/create-databases.sh:/scripts/create-databases.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - platform
+
+  # ------------------------------------------------------------------- Kafka
   kafka:
     image: confluentinc/cp-kafka:7.6.1
     restart: unless-stopped
@@ -83,25 +124,15 @@ services:
     networks:
       - platform
 
-  # Unica origem dos topicos (auto-create desligado no broker): cria o topico
-  # de eventos e a DLT com retencao infinita (a padrao, 7 dias, apagaria a
-  # massa de teste e mensagens da DLT). Idempotente.
   kafka-init:
     image: confluentinc/cp-kafka:7.6.1
     restart: "no"
+    entrypoint: ["/bin/sh", "/scripts/create-topics.sh"]
+    volumes:
+      - ./scripts/create-topics.sh:/scripts/create-topics.sh:ro
     depends_on:
       kafka:
         condition: service_healthy
-    entrypoint: ["sh", "-c"]
-    command:
-      - |
-        set -e
-        for topic in catalog.ItemCreated catalog.ItemCreated.DLT; do
-          kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
-            --topic "$$topic" --partitions 1 --replication-factor 1 \
-            --config retention.ms=-1
-        done
-        kafka-topics --bootstrap-server kafka:29092 --list
     networks:
       - platform
 
@@ -119,6 +150,76 @@ services:
     networks:
       - platform
 
+  # ------------------------------------------------------------------ Gateway
+  ms-gateway:
+    <<: *app-base
+    build:
+      context: ${GATEWAY_CONTEXT:-../ms-gateway}
+      target: production
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      UPSTREAM_AUTH_URL: http://ms-auth:8080
+      UPSTREAM_CATALOG_URL: http://ms-catalog:8080
+      UPSTREAM_TRANSPORT_URL: http://ms-transport:8080
+      UPSTREAM_CUSTOMER_URL: http://ms-customer:8080
+      UPSTREAM_SALES_ORDER_URL: http://ms-sales-order:8080
+      AUTH_JWKS_URL: http://ms-auth:8080/.well-known/jwks.json
+    ports:
+      - "${GATEWAY_PORT:-8088}:8080"
+    depends_on:
+      ms-auth:
+        condition: service_healthy
+    healthcheck: *app-healthcheck
+
+  # --------------------------------------------------------------------- Auth
+  auth-keygen:
+    image: node:24-alpine
+    restart: "no"
+    command: ["node", "/scripts/generate-auth-key.mjs"]
+    volumes:
+      - ./scripts/generate-auth-key.mjs:/scripts/generate-auth-key.mjs:ro
+      - auth_keys:/keys
+    networks:
+      - platform
+
+  auth-migrate:
+    build:
+      context: ${AUTH_CONTEXT:-../ms-auth}
+      target: migrate
+    restart: "no"
+    environment:
+      DATABASE_URL: postgresql://${AUTH_DB_USER:-auth}:${AUTH_DB_PASSWORD:-auth}@postgres:5432/${AUTH_DB_NAME:-auth}?schema=public
+    depends_on:
+      postgres-init:
+        condition: service_completed_successfully
+    networks:
+      - platform
+
+  ms-auth:
+    <<: *app-base
+    build:
+      context: ${AUTH_CONTEXT:-../ms-auth}
+      target: production
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgresql://${AUTH_DB_USER:-auth}:${AUTH_DB_PASSWORD:-auth}@postgres:5432/${AUTH_DB_NAME:-auth}?schema=public
+      AUTH_PRIVATE_KEY_FILE: /keys/signing-key.pem
+      AUTH_BOOTSTRAP_ADMIN_EMAIL: ${AUTH_BOOTSTRAP_ADMIN_EMAIL:-admin@ms-platform.local}
+      AUTH_BOOTSTRAP_ADMIN_PASSWORD: ${AUTH_BOOTSTRAP_ADMIN_PASSWORD:-admin-dev-password}
+    ports:
+      - "${AUTH_PORT:-3002}:8080"
+    volumes:
+      - auth_keys:/keys:ro
+    depends_on:
+      auth-keygen:
+        condition: service_completed_successfully
+      auth-migrate:
+        condition: service_completed_successfully
+    healthcheck: *app-healthcheck
+
+  # ------------------------------------------------------------------ Catalog
   catalog-migrate:
     build:
       context: ${CATALOG_CONTEXT:-../ms-catalog}
@@ -127,21 +228,19 @@ services:
     environment:
       DATABASE_URL: postgresql://${CATALOG_DB_USER:-catalog}:${CATALOG_DB_PASSWORD:-catalog}@postgres:5432/${CATALOG_DB_NAME:-catalog}?schema=public
     depends_on:
-      postgres:
-        condition: service_healthy
+      postgres-init:
+        condition: service_completed_successfully
     networks:
       - platform
 
   ms-catalog:
+    <<: *app-base
     build:
       context: ${CATALOG_CONTEXT:-../ms-catalog}
       target: production
-    restart: unless-stopped
     environment:
-      NODE_ENV: production
+      <<: *kafka-env
       DATABASE_URL: postgresql://${CATALOG_DB_USER:-catalog}:${CATALOG_DB_PASSWORD:-catalog}@postgres:5432/${CATALOG_DB_NAME:-catalog}?schema=public
-      KAFKA_BROKER: kafka:29092
-      LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
       - "${CATALOG_PORT:-3000}:8080"
     depends_on:
@@ -149,14 +248,9 @@ services:
         condition: service_completed_successfully
       kafka-init:
         condition: service_completed_successfully
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health/live"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - platform
+    healthcheck: *app-healthcheck
 
+  # ---------------------------------------------------------------- Transport
   transport-migrate:
     build:
       context: ${TRANSPORT_CONTEXT:-../ms-transport}
@@ -165,21 +259,19 @@ services:
     environment:
       DATABASE_URL: postgresql://${TRANSPORT_DB_USER:-transport}:${TRANSPORT_DB_PASSWORD:-transport}@postgres:5432/${TRANSPORT_DB_NAME:-transport}?schema=public
     depends_on:
-      postgres:
-        condition: service_healthy
+      postgres-init:
+        condition: service_completed_successfully
     networks:
       - platform
 
   ms-transport:
+    <<: *app-base
     build:
       context: ${TRANSPORT_CONTEXT:-../ms-transport}
       target: production
-    restart: unless-stopped
     environment:
-      NODE_ENV: production
+      <<: *kafka-env
       DATABASE_URL: postgresql://${TRANSPORT_DB_USER:-transport}:${TRANSPORT_DB_PASSWORD:-transport}@postgres:5432/${TRANSPORT_DB_NAME:-transport}?schema=public
-      KAFKA_BROKER: kafka:29092
-      LOG_LEVEL: ${LOG_LEVEL:-info}
       CATALOG_SYNC_GROUP_ID: ${CATALOG_SYNC_GROUP_ID:-ms-transport.catalog-item-sync}
     ports:
       - "${TRANSPORT_PORT:-3001}:8080"
@@ -188,11 +280,138 @@ services:
         condition: service_completed_successfully
       kafka-init:
         condition: service_completed_successfully
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health/live"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    healthcheck: *app-healthcheck
+
+  # ----------------------------------------------------------------- Customer
+  customer-migrate:
+    build:
+      context: ${CUSTOMER_CONTEXT:-../ms-customer}
+      target: migrate
+    restart: "no"
+    environment:
+      DATABASE_URL: postgresql://${CUSTOMER_DB_USER:-customer}:${CUSTOMER_DB_PASSWORD:-customer}@postgres:5432/${CUSTOMER_DB_NAME:-customer}?schema=public
+    depends_on:
+      postgres-init:
+        condition: service_completed_successfully
+    networks:
+      - platform
+
+  ms-customer:
+    <<: *app-base
+    build:
+      context: ${CUSTOMER_CONTEXT:-../ms-customer}
+      target: production
+    environment:
+      <<: *kafka-env
+      DATABASE_URL: postgresql://${CUSTOMER_DB_USER:-customer}:${CUSTOMER_DB_PASSWORD:-customer}@postgres:5432/${CUSTOMER_DB_NAME:-customer}?schema=public
+    ports:
+      - "${CUSTOMER_PORT:-3003}:8080"
+    depends_on:
+      customer-migrate:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+    healthcheck: *app-healthcheck
+
+  # -------------------------------------------------------------- Sales order
+  sales-order-migrate:
+    build:
+      context: ${SALES_ORDER_CONTEXT:-../ms-sales-order}
+      target: migrate
+    restart: "no"
+    environment:
+      DATABASE_URL: postgresql://${SALES_ORDER_DB_USER:-sales_order}:${SALES_ORDER_DB_PASSWORD:-sales_order}@postgres:5432/${SALES_ORDER_DB_NAME:-sales_order}?schema=public
+    depends_on:
+      postgres-init:
+        condition: service_completed_successfully
+    networks:
+      - platform
+
+  ms-sales-order:
+    <<: *app-base
+    build:
+      context: ${SALES_ORDER_CONTEXT:-../ms-sales-order}
+      target: production
+    environment:
+      <<: *kafka-env
+      DATABASE_URL: postgresql://${SALES_ORDER_DB_USER:-sales_order}:${SALES_ORDER_DB_PASSWORD:-sales_order}@postgres:5432/${SALES_ORDER_DB_NAME:-sales_order}?schema=public
+    ports:
+      - "${SALES_ORDER_PORT:-3004}:8080"
+    depends_on:
+      sales-order-migrate:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+    healthcheck: *app-healthcheck
+
+  # --------------------------------------------------------- Observabilidade
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-7d}
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - platform
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.8.0
+    restart: unless-stopped
+    command: ["--kafka.server=kafka:29092"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - platform
+
+  loki:
+    image: grafana/loki:3.2.1
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/loki.yml"]
+    ports:
+      - "${LOKI_PORT:-3100}:3100"
+    volumes:
+      - ./observability/loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki_data:/loki
+    networks:
+      - platform
+
+  # Coleta os logs (stdout JSON do pino) dos containers deste compose pelo
+  # socket do Docker e envia ao Loki.
+  alloy:
+    image: grafana/alloy:v1.4.3
+    restart: unless-stopped
+    command: ["run", "/etc/alloy/config.alloy", "--storage.path=/var/lib/alloy/data"]
+    volumes:
+      - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - loki
+    networks:
+      - platform
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "${GRAFANA_PORT:-3300}:3000"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - loki
     networks:
       - platform
 
@@ -201,6 +420,14 @@ volumes:
     name: ${POSTGRES_VOLUME:-ms-platform_postgres_data}
   kafka_data:
     name: ${KAFKA_VOLUME:-ms-catalog_kafka_data}
+  auth_keys:
+    name: ${AUTH_KEYS_VOLUME:-ms-platform_auth_keys}
+  prometheus_data:
+    name: ${PROMETHEUS_VOLUME:-ms-platform_prometheus_data}
+  loki_data:
+    name: ${LOKI_VOLUME:-ms-platform_loki_data}
+  grafana_data:
+    name: ${GRAFANA_VOLUME:-ms-platform_grafana_data}
 
 networks:
   platform:

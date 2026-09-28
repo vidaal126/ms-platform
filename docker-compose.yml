@@ -1,0 +1,207 @@
+# Ambiente completo: ms-catalog, ms-transport e a infraestrutura dos dois.
+#
+#   docker compose up -d --build              sobe tudo (apps em container)
+#   docker compose up -d postgres kafka kafka-init kafka-ui
+#                                             so a infraestrutura, para rodar os apps no host
+#
+# Os servicos sao buildados a partir dos repositorios irmaos (../ms-catalog e
+# ../ms-transport; configuravel por CATALOG_CONTEXT e TRANSPORT_CONTEXT).
+#
+# Postgres: um container, dois databases (catalog e transport), cada um com
+# usuario proprio, criados por initdb/01-create-databases.sh na primeira subida.
+#
+# Kafka tem dois listeners: INTERNAL (kafka:29092) para quem esta na rede do
+# compose e EXTERNAL (localhost:9092) para os apps rodando no host. Por isso os
+# containers recebem KAFKA_BROKER=kafka:29092 e o .env do host usa
+# localhost:9092.
+#
+# Auto-create de topicos desligado: todo topico existe porque o kafka-init o
+# criou (particoes e retencao explicitas). Um nome de topico errado falha em
+# vez de criar um topico novo silenciosamente.
+#
+# Volumes: o do Kafka reaproveita, por padrao, o volume do compose antigo
+# (ms-catalog_kafka_data), preservando a massa do topico. Para um ambiente
+# isolado, sobrescreva KAFKA_VOLUME e POSTGRES_VOLUME (ver README).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:-postgres}
+      CATALOG_DB_USER: ${CATALOG_DB_USER:-catalog}
+      CATALOG_DB_PASSWORD: ${CATALOG_DB_PASSWORD:-catalog}
+      CATALOG_DB_NAME: ${CATALOG_DB_NAME:-catalog}
+      TRANSPORT_DB_USER: ${TRANSPORT_DB_USER:-transport}
+      TRANSPORT_DB_PASSWORD: ${TRANSPORT_DB_PASSWORD:-transport}
+      TRANSPORT_DB_NAME: ${TRANSPORT_DB_NAME:-transport}
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # TCP em 127.0.0.1 so responde depois do init (o servidor temporario do
+      # initdb escuta apenas no socket): saudavel = os dois databases existem.
+      test:
+        - CMD-SHELL
+        - psql -h 127.0.0.1 -U $${POSTGRES_USER} -d $${TRANSPORT_DB_NAME} -tAc 'select 1' >/dev/null
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - platform
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    restart: unless-stopped
+    ports:
+      - "${KAFKA_EXTERNAL_PORT:-9092}:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:${KAFKA_EXTERNAL_PORT:-9092}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      # Mesmo CLUSTER_ID do compose antigo: obrigatorio para reabrir o volume.
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:29092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    networks:
+      - platform
+
+  # Unica origem dos topicos (auto-create desligado no broker): cria o topico
+  # de eventos e a DLT com retencao infinita (a padrao, 7 dias, apagaria a
+  # massa de teste e mensagens da DLT). Idempotente.
+  kafka-init:
+    image: confluentinc/cp-kafka:7.6.1
+    restart: "no"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        for topic in catalog.ItemCreated catalog.ItemCreated.DLT; do
+          kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
+            --topic "$$topic" --partitions 1 --replication-factor 1 \
+            --config retention.ms=-1
+        done
+        kafka-topics --bootstrap-server kafka:29092 --list
+    networks:
+      - platform
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    restart: unless-stopped
+    ports:
+      - "${KAFKA_UI_PORT:-8090}:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - platform
+
+  catalog-migrate:
+    build:
+      context: ${CATALOG_CONTEXT:-../ms-catalog}
+      target: migrate
+    restart: "no"
+    environment:
+      DATABASE_URL: postgresql://${CATALOG_DB_USER:-catalog}:${CATALOG_DB_PASSWORD:-catalog}@postgres:5432/${CATALOG_DB_NAME:-catalog}?schema=public
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - platform
+
+  ms-catalog:
+    build:
+      context: ${CATALOG_CONTEXT:-../ms-catalog}
+      target: production
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${CATALOG_DB_USER:-catalog}:${CATALOG_DB_PASSWORD:-catalog}@postgres:5432/${CATALOG_DB_NAME:-catalog}?schema=public
+      KAFKA_BROKER: kafka:29092
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${CATALOG_PORT:-3000}:8080"
+    depends_on:
+      catalog-migrate:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - platform
+
+  transport-migrate:
+    build:
+      context: ${TRANSPORT_CONTEXT:-../ms-transport}
+      target: migrate
+    restart: "no"
+    environment:
+      DATABASE_URL: postgresql://${TRANSPORT_DB_USER:-transport}:${TRANSPORT_DB_PASSWORD:-transport}@postgres:5432/${TRANSPORT_DB_NAME:-transport}?schema=public
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - platform
+
+  ms-transport:
+    build:
+      context: ${TRANSPORT_CONTEXT:-../ms-transport}
+      target: production
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${TRANSPORT_DB_USER:-transport}:${TRANSPORT_DB_PASSWORD:-transport}@postgres:5432/${TRANSPORT_DB_NAME:-transport}?schema=public
+      KAFKA_BROKER: kafka:29092
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      CATALOG_SYNC_GROUP_ID: ${CATALOG_SYNC_GROUP_ID:-ms-transport.catalog-item-sync}
+    ports:
+      - "${TRANSPORT_PORT:-3001}:8080"
+    depends_on:
+      transport-migrate:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - platform
+
+volumes:
+  postgres_data:
+    name: ${POSTGRES_VOLUME:-ms-platform_postgres_data}
+  kafka_data:
+    name: ${KAFKA_VOLUME:-ms-catalog_kafka_data}
+
+networks:
+  platform:
+    driver: bridge

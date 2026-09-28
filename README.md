@@ -1,5 +1,7 @@
 # ms-platform
 
+> Plataforma: **ms-platform** · [ms-gateway](https://github.com/vidaal126/ms-gateway#readme) · [ms-auth](https://github.com/vidaal126/ms-auth#readme) · [ms-catalog](https://github.com/vidaal126/ms-catalog#readme) · [ms-transport](https://github.com/vidaal126/ms-transport#readme) · [ms-customer](https://github.com/vidaal126/ms-customer#readme) · [ms-sales-order](https://github.com/vidaal126/ms-sales-order#readme)
+
 Ambiente compartilhado dos microserviços extraídos do monolito
 `sales-order-api`: compose, jobs de inicialização, observabilidade e o smoke
 test ponta a ponta.
@@ -10,12 +12,12 @@ eventos e das rotas HTTP.
 
 | Serviço | Papel | Database | Publica | Consome |
 |---|---|---|---|---|
-| [ms-gateway](../ms-gateway/README.md) | entrada única `/api/v1`, valida JWT (JWKS) e autoriza por rota | - | - | - |
-| [ms-auth](../ms-auth/README.md) | usuários, roles, login, refresh rotativo, JWKS | `auth` | - | - |
-| [ms-catalog](../ms-catalog/README.md) | itens (preço, peso, dimensões) | `catalog` | `catalog.ItemCreated` | - |
-| [ms-transport](../ms-transport/README.md) | tipos de transporte e read model físico dos itens | `transport` | `transport.TransportType{Created,Updated}` | `catalog.ItemCreated` |
-| [ms-customer](../ms-customer/README.md) | clientes (CPF) e transportes autorizados | `customer` | `customer.Customer{Created,Updated}` | `transport.*` |
-| [ms-sales-order](../ms-sales-order/README.md) | pedidos, máquina de estados, agendamento | `sales_order` | `sales-order.*` | `catalog.ItemCreated`, `customer.*`, `transport.*` |
+| [ms-gateway](https://github.com/vidaal126/ms-gateway#readme) | entrada única `/api/v1`, valida JWT (JWKS) e autoriza por rota | - | - | - |
+| [ms-auth](https://github.com/vidaal126/ms-auth#readme) | usuários, roles, login, refresh rotativo, JWKS | `auth` | - | - |
+| [ms-catalog](https://github.com/vidaal126/ms-catalog#readme) | itens (preço, peso, dimensões) | `catalog` | `catalog.ItemCreated` | - |
+| [ms-transport](https://github.com/vidaal126/ms-transport#readme) | tipos de transporte e read model físico dos itens | `transport` | `transport.TransportType{Created,Updated}` | `catalog.ItemCreated` |
+| [ms-customer](https://github.com/vidaal126/ms-customer#readme) | clientes (CPF) e transportes autorizados | `customer` | `customer.Customer{Created,Updated}` | `transport.*` |
+| [ms-sales-order](https://github.com/vidaal126/ms-sales-order#readme) | pedidos, máquina de estados, agendamento | `sales_order` | `sales-order.*` | `catalog.ItemCreated`, `customer.*`, `transport.*` |
 
 ## Arquitetura
 

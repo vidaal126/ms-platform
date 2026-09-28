@@ -1,0 +1,62 @@
+// Descobre os containers dos servicos ms-* pelo socket do Docker, le o
+// stdout (JSON do pino) e envia ao Loki.
+// Labels (baixa cardinalidade): service, project, level.
+// correlationId: structured metadata, pesquisavel sem virar label.
+
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+  // Padrao e 60s: containers recriados (deploy) perderiam os primeiros logs.
+  refresh_interval = "5s"
+}
+
+discovery.relabel "services" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = "ms-.*"
+    action        = "keep"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    target_label  = "project"
+  }
+}
+
+loki.source.docker "services" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.services.output
+  forward_to = [loki.process.pino.receiver]
+}
+
+loki.process "pino" {
+  stage.json {
+    expressions = {
+      level         = "level",
+      correlationId = "correlationId",
+    }
+  }
+
+  // pino: 10 trace, 20 debug, 30 info, 40 warn, 50 error, 60 fatal.
+  stage.labels {
+    values = { level = "" }
+  }
+
+  stage.structured_metadata {
+    values = { correlationId = "" }
+  }
+
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

@@ -165,6 +165,9 @@ services:
       UPSTREAM_CUSTOMER_URL: http://ms-customer:8080
       UPSTREAM_SALES_ORDER_URL: http://ms-sales-order:8080
       AUTH_JWKS_URL: http://ms-auth:8080/.well-known/jwks.json
+      # /metrics so nesta porta interna (scrape do Prometheus). Nao publicar:
+      # deve bater com o target em observability/prometheus/prometheus.yml.
+      METRICS_PORT: "9464"
     ports:
       - "${GATEWAY_PORT:-8088}:8080"
     depends_on:

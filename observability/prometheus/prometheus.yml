@@ -1,5 +1,6 @@
-# Scrape dos 6 servicos (GET /metrics na rede interna; o gateway nao roteia
-# /metrics) e do kafka-exporter (lag dos consumer groups).
+# Scrape dos 6 servicos (GET /metrics na rede interna) e do kafka-exporter
+# (lag dos consumer groups). O gateway serve /metrics so na porta interna
+# METRICS_PORT (9464), nunca na porta publica.
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
@@ -9,7 +10,7 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets:
-          - ms-gateway:8080
+          - ms-gateway:9464
           - ms-auth:8080
           - ms-catalog:8080
           - ms-transport:8080

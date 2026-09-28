@@ -141,7 +141,10 @@ existente.
 ## Observabilidade
 
 - **Métricas**: cada serviço expõe `GET /metrics` (prom-client) na rede
-  interna; o gateway não roteia essa rota. Métricas comuns:
+  interna. No ms-gateway, `/metrics` fica numa porta própria,
+  `METRICS_PORT` (9464), que não é publicada no host; a porta pública (8088)
+  responde 404 para `/metrics`. O Prometheus faz o scrape em
+  `ms-gateway:9464`. Métricas comuns:
   - `http_request_duration_seconds{service, method, route, status_code}`, com
     a rota em forma de template, para manter a cardinalidade baixa;
   - `kafka_messages_consumed_total{topic, outcome}`, com `outcome` entre
